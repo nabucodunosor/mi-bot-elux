@@ -19,10 +19,15 @@ GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
 
 if GOOGLE_API_KEY:
     genai.configure(api_key=GOOGLE_API_KEY)
-    model = genai.GenerativeModel('gemini-1.5-flash')
+   model = genai.GenerativeModel(
+    model_name='gemini-1.5-flash',
+    generation_config={"temperature": 0.1} # Lo hacemos más "serio" y preciso
+)
 
-SYSTEM_PROMPT = "Sos el asistente de Elux Materiales Eléctricos (La Plata). Respondé siempre en español rioplatense, amigable y muy breve."
-
+SYSTEM_PROMPT = """Sos el asistente de Elux Materiales Eléctricos. 
+Usá ÚNICAMENTE los precios de la lista que te paso. 
+Si no encontrás el producto exacto, decí qué opciones similares tenés.
+Respondé cortito y con onda platense."""
 # --- FUNCIONES ---
 def buscar_productos(texto):
     texto = texto.lower()
