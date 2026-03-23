@@ -4,83 +4,76 @@ import google.generativeai as genai
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-# --- 1. CARGAR CATÁLOGO ---
+# --- 1. CARGAR CATÁLOGO (QUID / ELUX) ---
 try:
     with open("productos.json", "r", encoding="utf-8") as f:
         PRODUCTOS = json.load(f)
-    print(f"✅ Catálogo cargado con {len(PRODUCTOS)} productos.")
+    print(f"✅ Catálogo cargado: {len(PRODUCTOS)} productos.")
 except Exception as e:
-    print(f"❌ Error al cargar productos.json: {e}")
+    print(f"❌ Error productos.json: {e}")
     PRODUCTOS = []
 
-# --- 2. CONFIGURACIÓN DE LLAVES ---
+# --- 2. CONFIGURACIÓN IA (EL CEREBRO) ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
 
-# Configurar IA
 genai.configure(api_key=GOOGLE_API_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')
+# Cambiamos a la versión específica que no tira 404
+model = genai.GenerativeModel('gemini-1.5-flash-latest') 
 
-# Instrucciones para el bot
-SYSTEM_PROMPT = """Sos el asistente de Elux Materiales Eléctricos en La Plata. 
-Respondé SIEMPRE en español rioplatense, amable y muy breve.
-Si el usuario pregunta por productos, usá la lista que te paso. 
-Los precios ya incluyen el margen, son finales.
-Si no encontrás algo, decile que nos consulte al WhatsApp 221 399 3484."""
+SYSTEM_PROMPT = """Sos el experto en ventas de Elux Materiales Eléctricos (La Plata). 
+Tu misión es ASESORAR y VENDER. 
+- Hablá en español rioplatense (che, mirá, tenés).
+- Si el cliente busca algo, usá los precios que te paso.
+- Si no está lo exacto, ofrecele lo más parecido (ej: si busca cable de 1.5 y no hay, ofrecele de 2.5 explicando por qué es mejor).
+- Si te preguntan por horarios o ubicación: Calle 20 N° 498, Lun-Vie 9-18hs, Sáb 9-13hs.
+"""
 
-# --- 3. FUNCIONES DE LÓGICA ---
-def buscar_en_catalogo(consulta):
-    consulta = consulta.lower()
-    # Busca coincidencias en la descripción del producto
-    encontrados = [p for p in PRODUCTOS if consulta in p['descripcion'].lower()]
-    # Devolvemos solo los 5 mejores para que la IA no se maree
-    return encontrados[:5]
+# --- 3. LÓGICA DE BÚSQUEDA ---
+def buscar_productos(texto):
+    texto = texto.lower()
+    return [p for p in PRODUCTOS if texto in p['descripcion'].lower()][:6]
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("¡Hola! Soy el asistente de Elux. ¿Qué materiales estás buscando?")
+    await update.message.reply_text("¡Buenas! Soy el asistente de Elux. ¿Qué materiales necesitás para tu obra?")
 
 async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
+    resultados = buscar_productos(user_text)
     
-    # Manejo rápido de horarios para no gastar IA
-    if any(palabra in user_text.lower() for palabra in ["horario", "abierto", "donde estan", "direccion"]):
-        await update.message.reply_text("Estamos en Calle 20 N° 498 (casi 42), La Plata. 🕙 Lunes a Viernes 9-18hs y Sábados 9-13hs.")
-        return
+    # Formateamos los precios para que la IA los entienda fácil
+    lista_precios = ""
+    if resultados:
+        for p in resultados:
+            lista_precios += f"- {p['descripcion']}: ${p['precio']}\n"
+    else:
+        lista_precios = "No encontré el producto exacto en el catálogo."
 
-    # Búsqueda de productos
-    resultados = buscar_en_catalogo(user_text)
-    
-    # Armamos el texto para la IA
-    contexto = f"\nProductos en stock: {resultados}" if resultados else "\nNo hay coincidencias exactas en el catálogo."
-    prompt_final = f"{SYSTEM_PROMPT}\n\nConsulta del cliente: {user_text}\n{contexto}"
+    # Armamos el pedido a la IA
+    prompt_final = f"{SYSTEM_PROMPT}\n\nCatálogo disponible:\n{lista_precios}\n\nCliente dice: {user_text}"
 
     try:
         response = model.generate_content(prompt_final)
         if response.text:
             await update.message.reply_text(response.text)
         else:
-            raise Exception("Respuesta vacía")
+            raise Exception("Respuesta vacía de Gemini")
+            
     except Exception as e:
         print(f"⚠️ Error en Gemini: {e}")
-        # Si falla la IA, mostramos los resultados directo (Plan B)
+        # PLAN B: Si la IA falla, que no sea un tarado y dé la info rústica
         if resultados:
-            texto_b = "Che, tengo una falla en la conexión, pero acá encontré esto:\n"
-            for p in resultados:
-                texto_b += f"• {p['descripcion']}: ${p['precio']}\n"
-            await update.message.reply_text(texto_b)
+            msg = "Mirá, ando con un problema técnico, pero acá te encontré estos precios en el sistema:\n\n"
+            msg += lista_precios
+            msg += "\n¿Te sirve alguno? Si no, hablame al WhatsApp 221 399 3484."
+            await update.message.reply_text(msg)
         else:
-            await update.message.reply_text("Perdón, me tiró un error la conexión. ¿Me repetís o me hablás al WhatsApp 221 399 3484?")
+            await update.message.reply_text("Perdón che, me anda mal la conexión. Consultame al WhatsApp 221 399 3484 que te paso el precio al toque.")
 
-# --- 4. ARRANQUE DEL BOT ---
+# --- 4. ARRANQUE ---
 if __name__ == '__main__':
-    if not TELEGRAM_TOKEN or not GOOGLE_API_KEY:
-        print("❌ ERROR: Faltan las variables TELEGRAM_TOKEN o GOOGLE_API_KEY en Railway.")
-    else:
-        # Usamos ApplicationBuilder para evitar el error de 'Updater'
-        application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-        
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, responder))
-        
-        print("🚀 Bot Elux encendido y escuchando...")
-        application.run_polling()
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, responder))
+    print("🚀 Obrero de QUID Soluciones en marcha...")
+    app.run_polling()
