@@ -4,71 +4,39 @@ import google.generativeai as genai
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-# --- 1. CARGAR CATÁLOGO ---
+# 1. CARGAR PRODUCTOS
 try:
     with open("productos.json", "r", encoding="utf-8") as f:
         PRODUCTOS = json.load(f)
-    print(f"✅ Catálogo cargado: {len(PRODUCTOS)} productos.")
-except Exception as e:
-    print(f"❌ Error productos.json: {e}")
+except:
     PRODUCTOS = []
 
-# --- 2. CONFIGURACIÓN IA ---
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
-
-# Intentamos configurar la IA con el modelo más compatible
-try:
-    genai.configure(api_key=GOOGLE_API_KEY)
-    # Cambiamos a 'gemini-1.5-flash' a secas, que es el estándar
-    model = genai.GenerativeModel('gemini-1.5-flash') 
-except:
-    model = None
-
-SYSTEM_PROMPT = "Sos el experto de Elux (La Plata). Hablá en rioplatense, sé breve y vendedora."
-
-# --- 3. LÓGICA DE BÚSQUEDA ---
-def buscar_productos(texto):
-    texto = texto.lower()
-    return [p for p in PRODUCTOS if texto in p['descripcion'].lower()][:5]
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("¡Buenas! Soy el asistente de Elux. ¿Qué materiales buscás hoy?")
+# 2. CONFIGURACIÓN (Directa)
+genai.configure(api_key=os.environ.get("GOOGLE_API_KEY", ""))
+model = genai.GenerativeModel('gemini-1.5-flash')
 
 async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
-    resultados = buscar_productos(user_text)
+    # BUSQUEDA MANUAL (No depende de la IA para encontrar el precio)
+    resultados = [p for p in PRODUCTOS if user_text.lower() in p['descripcion'].lower()][:3]
     
-    # 1. Preparamos la info de precios
-    info_precios = ""
-    if resultados:
-        info_precios = "Mirá, acá encontré estos precios en el sistema:\n"
-        for p in resultados:
-            info_precios += f"• {p['descripcion']}: ${p['precio']}\n"
-    
-    # 2. Intentamos que la IA procese la respuesta con onda
+    precios_texto = ""
+    for p in resultados:
+        precios_texto += f"• {p['descripcion']}: ${p['precio']}\n"
+
     try:
-        prompt = f"{SYSTEM_PROMPT}\nStock: {info_precios}\nCliente dice: {user_text}"
+        # Intentamos que la IA solo le dé "forma" al mensaje
+        prompt = f"Sos el bot de Elux. El cliente dice: '{user_text}'. Info de precios: {precios_texto}. Respondé cortito."
         response = model.generate_content(prompt)
         await update.message.reply_text(response.text)
-    
-    except Exception as e:
-        print(f"⚠️ Error Gemini: {e}")
-        # 3. SI LA IA FALLA, MANDAMOS LOS PRECIOS PELADOS (Para que no sea un tarado)
-        if resultados:
-            msg_emergencia = f"Che, la IA está medio lenta, pero acá tenés los precios:\n\n{info_precios}\n¿Te sirve algo? Avisame o mandame al WhatsApp 221 399 3484."
-            await update.message.reply_text(msg_emergencia)
+    except:
+        # SI LA IA FALLA, EL BOT RESPONDE ESTO SÍ O SÍ (Sin IA)
+        if precios_texto:
+            await update.message.reply_text(f"Acá tenés los precios:\n{precios_texto}")
         else:
-            # Si no hay productos y falla la IA, damos los horarios/contacto
-            if "horario" in user_text.lower() or "donde" in user_text.lower():
-                 await update.message.reply_text("Estamos en Calle 20 N° 498. Lun-Vie 9-18hs y Sáb 9-13hs.")
-            else:
-                 await update.message.reply_text("Perdón, tuve un error de conexión. Consultame al WhatsApp 221 399 3484 y te paso el precio al toque.")
+            await update.message.reply_text("No encontré eso. Consultanos al 221 399 3484.")
 
-# --- 4. ARRANQUE ---
 if __name__ == '__main__':
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
+    app = ApplicationBuilder().token(os.environ.get("TELEGRAM_TOKEN", "")).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, responder))
-    print("🚀 Bot de QUID / Elux en marcha...")
     app.run_polling()
