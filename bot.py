@@ -1,42 +1,136 @@
 import os
 import json
-import google.generativeai as genai
+import re
+from groq import Groq
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 
-# 1. CARGAR PRODUCTOS
-try:
-    with open("productos.json", "r", encoding="utf-8") as f:
-        PRODUCTOS = json.load(f)
-except:
-    PRODUCTOS = []
+# ── Cargar catálogo ──────────────────────────────────────────
+with open("productos.json", "r", encoding="utf-8") as f:
+    PRODUCTOS = json.load(f)
 
-# 2. CONFIGURACIÓN (Directa)
-genai.configure(api_key=os.environ.get("GOOGLE_API_KEY", ""))
-model = genai.GenerativeModel('gemini-1.5-flash')
+print(f"✅ Catálogo cargado: {len(PRODUCTOS)} productos")
 
-async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_text = update.message.text
-    # BUSQUEDA MANUAL (No depende de la IA para encontrar el precio)
-    resultados = [p for p in PRODUCTOS if user_text.lower() in p['descripcion'].lower()][:3]
-    
-    precios_texto = ""
+# ── Config Groq ──────────────────────────────────────────────
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+GROQ_API_KEY   = os.environ.get("GROQ_API_KEY", "")
+client = Groq(api_key=GROQ_API_KEY)
+
+SYSTEM_PROMPT = """Sos el asistente virtual de Elux Materiales Eléctricos, un local de venta de materiales eléctricos en La Plata, Argentina.
+
+Información del negocio:
+- Dirección: Calle 20 N° 498 casi 42, La Plata, Buenos Aires
+- WhatsApp: 221 399 3484
+- Marcas: Conductores Kalop, Interruptores Jeluz, Térmicas y disyuntores SICA y ABB
+- Pago: efectivo y transferencia bancaria (no tarjetas)
+- Envíos: no se realizan, solo venta en el local
+- Horarios: Lunes a viernes 9-18hs, sábados 9-13hs
+
+Reglas:
+- Respondé en español rioplatense, de forma amigable y breve (máximo 4 oraciones)
+- Los precios que te muestran YA tienen el margen aplicado — son los precios finales para el cliente
+- SIEMPRE aclarás que los precios son orientativos, que hay que consultar por descuentos y confirmar stock
+- Para confirmar stock o pedir descuentos, siempre derivá al WhatsApp: 221 399 3484
+- No inventes productos ni precios que no estén en los resultados de búsqueda
+- Usá formato simple de texto, sin markdown"""
+
+# ── Búsqueda en catálogo ─────────────────────────────────────
+def buscar_productos(query: str, limite: int = 6):
+    if not query or len(query) < 2:
+        return [], 0
+    por_codigo = [p for p in PRODUCTOS if p["codigo"].lower() == query.lower()]
+    stopwords = {"el","la","los","las","un","una","de","del","que","en","es","con",
+                 "por","para","me","te","se","le","y","o","a","al","hay","tiene",
+                 "tienen","precio","cuanto","cuánto","busco","necesito","stock"}
+    terms = [t for t in query.lower().split() if len(t) > 2 and t not in stopwords]
+    por_desc = []
+    if terms:
+        for p in PRODUCTOS:
+            if p in por_codigo:
+                continue
+            haystack = (p["codigo"] + " " + p["descripcion"]).lower()
+            if all(t in haystack for t in terms):
+                por_desc.append(p)
+    todos = por_codigo + por_desc
+    return todos[:limite], len(todos)
+
+def detectar_busqueda(texto: str) -> bool:
+    keywords = ["precio","cuanto","cuánto","tienen","busco","buscar","necesito",
+                "hay","stock","costo","vale","producto","modelo","código","codigo"]
+    lower = texto.lower()
+    if any(k in lower for k in keywords):
+        return True
+    if re.match(r"^\d{4,}", texto.strip()):
+        return True
+    stopwords = {"el","la","los","las","un","una","de","del","que","en","es",
+                 "con","por","para","me","te","se","le","y","o","a","al"}
+    words = [w for w in lower.split() if len(w) > 2 and w not in stopwords]
+    return len(words) >= 2
+
+def formato_precio(precio: float) -> str:
+    return f"${precio:,.0f}".replace(",", ".")
+
+def construir_contexto_productos(texto: str) -> str:
+    resultados, total = buscar_productos(texto)
+    if not resultados:
+        return "\n\nBÚSQUEDA EN CATÁLOGO: No se encontraron productos que coincidan."
+    ctx = f"\n\nRESULTADOS DE BÚSQUEDA ({total} encontrados, mostrando {len(resultados)}):\n"
     for p in resultados:
-        precios_texto += f"• {p['descripcion']}: ${p['precio']}\n"
+        ctx += f"- [{p['codigo']}] {p['descripcion']} → {formato_precio(p['precio_venta'])}\n"
+    return ctx
+
+# ── Handlers ─────────────────────────────────────────────────
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "⚡ Hola! Soy el asistente de Elux Materiales Eléctricos.\n\n"
+        "Podés preguntarme por productos, precios, horarios o cualquier consulta.\n\n"
+        "📍 Calle 20 N° 498 casi 42, La Plata\n"
+        "📱 WhatsApp: 221 399 3484"
+    )
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    texto = update.message.text.strip()
+    if not texto:
+        return
+
+    await context.bot.send_chat_action(
+        chat_id=update.effective_chat.id,
+        action="typing"
+    )
+
+    product_context = ""
+    if detectar_busqueda(texto):
+        product_context = construir_contexto_productos(texto)
 
     try:
-        # Intentamos que la IA solo le dé "forma" al mensaje
-        prompt = f"Sos el bot de Elux. El cliente dice: '{user_text}'. Info de precios: {precios_texto}. Respondé cortito."
-        response = model.generate_content(prompt)
-        await update.message.reply_text(response.text)
-    except:
-        # SI LA IA FALLA, EL BOT RESPONDE ESTO SÍ O SÍ (Sin IA)
-        if precios_texto:
-            await update.message.reply_text(f"Acá tenés los precios:\n{precios_texto}")
-        else:
-            await update.message.reply_text("No encontré eso. Consultanos al 221 399 3484.")
+        response = client.chat.completions.create(
+            model="llama3-8b-8192",
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user",   "content": texto + product_context}
+            ],
+            max_tokens=500
+        )
+        reply = response.choices[0].message.content
+    except Exception as e:
+        reply = "Hubo un error al procesar tu consulta. Escribinos al WhatsApp 221 399 3484."
+        print(f"Error Groq: {e}")
 
-if __name__ == '__main__':
-    app = ApplicationBuilder().token(os.environ.get("TELEGRAM_TOKEN", "")).build()
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, responder))
-    app.run_polling()
+    await update.message.reply_text(reply)
+
+# ── Main ─────────────────────────────────────────────────────
+def main():
+    if not TELEGRAM_TOKEN:
+        raise ValueError("Falta TELEGRAM_TOKEN")
+    if not GROQ_API_KEY:
+        raise ValueError("Falta GROQ_API_KEY")
+
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    print("🤖 Bot Elux iniciado con Groq...")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == "__main__":
+    main()
