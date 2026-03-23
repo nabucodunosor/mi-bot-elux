@@ -1,72 +1,35 @@
-import os
-import json
-import google.generativeai as genai
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-
-# --- CARGAR CATÁLOGO ---
-try:
-    with open("productos.json", "r", encoding="utf-8") as f:
-        PRODUCTOS = json.load(f)
-    print(f"✅ Catálogo cargado: {len(PRODUCTOS)} productos.")
-except Exception as e:
-    print(f"❌ Error al cargar productos.json: {e}")
-    PRODUCTOS = []
-
-# --- CONFIGURACIÓN ---
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
-
-genai.configure(api_key=GOOGLE_API_KEY)
-# Usamos 1.5-flash que es más estable para mensajes rápidos
-model = genai.GenerativeModel('gemini-1.5-flash')
-
-SYSTEM_PROMPT = """Sos el asistente de Elux Materiales Eléctricos (La Plata). 
-Respondé SIEMPRE en español rioplatense, amigable y muy breve.
-Si te paso productos del catálogo, decile el precio al cliente. 
-Los precios YA tienen el margen, son finales."""
-
-# --- FUNCIONES ---
-def buscar_productos(texto):
-    texto = texto.lower()
-    # Buscamos coincidencias en la descripción
-    encontrados = [p for p in PRODUCTOS if texto in p['descripcion'].lower()]
-    # Devolvemos solo los primeros 5 para no saturar a la IA
-    return encontrados[:5]
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("¡Hola! Soy el bot de Elux. ¿Qué materiales estás buscando hoy?")
-
 async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     resultados = buscar_productos(user_text)
     
-    # Armamos el mensaje para la IA
-    contexto_productos = f"\nProductos encontrados en stock: {resultados}" if resultados else "\nNo se encontraron productos exactos."
-    instruccion = f"{SYSTEM_PROMPT}\n\nCliente pregunta: {user_text}\n{contexto_productos}"
+    # Simplificamos los resultados para que la IA no se trabe con símbolos raros
+    lista_precios = ""
+    for p in resultados:
+        lista_precios += f"- {p['descripcion']}: ${p['precio']}\n"
+
+    # Instrucción ultra-clara
+    instruccion = f"""
+    Eres el asistente de Elux. 
+    Datos del local: Calle 20 N° 498 casi 42, La Plata. Lunes a Viernes 9-18hs, Sábados 9-13hs.
+    Stock encontrado para esta duda:
+    {lista_precios}
+    
+    Responde al cliente de forma breve en español de Argentina: {user_text}
+    """
 
     try:
-        # Generar respuesta con Gemini
+        # Forzamos una configuración más relajada de seguridad
         response = model.generate_content(instruccion)
-        await update.message.reply_text(response.text)
+        if response.text:
+            await update.message.reply_text(response.text)
+        else:
+            raise Exception("Respuesta vacía")
     except Exception as e:
         print(f"⚠️ Error en Gemini: {e}")
-        # Si falla la IA, al menos intentamos darle los precios directo
-        if resultados:
-            respuesta_emergencia = "Che, tengo un problema con la IA, pero acá encontré esto:\n"
-            for p in resultados:
-                respuesta_emergencia += f"- {p['descripcion']}: ${p['precio']}\n"
-            await update.message.reply_text(respuesta_emergencia)
+        # Si la IA falla, mandamos la info de horarios o productos a mano
+        if "horario" in user_text.lower():
+            await update.message.reply_text("Atendemos de Lunes a Viernes de 9 a 18hs y Sábados de 9 a 13hs en Calle 20 N° 498.")
+        elif resultados:
+            await update.message.reply_text(f"Mirá, no pude procesar el mensaje con la IA, pero acá tenés los precios:\n{lista_precios}")
         else:
-            await update.message.reply_text("Perdón, me tiró un error la conexión. ¿Me repetís o me hablás al WhatsApp?")
-
-# --- ARRANQUE ---
-if __name__ == '__main__':
-    if not TELEGRAM_TOKEN or not GOOGLE_API_KEY:
-        print("❌ FALTAN VARIABLES DE ENTORNO. Revisá Railway.")
-    else:
-        app = Application.builder().token(TELEGRAM_TOKEN).build()
-        app.add_handler(CommandHandler("start", start))
-        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, responder))
-        print("🚀 Bot funcionando...")
-        app.run_polling()
+            await update.message.reply_text("Che, estoy con una falla en la conexión. Escribinos al WhatsApp 221 399 3484 y te pasamos el precio al toque.")
