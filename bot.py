@@ -1,7 +1,7 @@
 import os
 import json
 import re
-
+import google.generativeai as genai
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 
